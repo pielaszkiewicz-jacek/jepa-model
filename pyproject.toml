@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "r-jepa-stock-prediction"
+version = "0.1.0"
+description = "Stock price prediction using Recurrent Joint Embedding Predictive Architecture (R-JEPA)"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]
+
+[tool.pyright]
+strict = true
+pythonVersion = "3.13"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]

@@ -1,0 +1,63 @@
+# R-JEPA Stock Prediction Configuration
+#
+# Supports both daily and high-frequency (intraday/tick) data.
+
+data:
+  tickers: ["AAPL", "MSFT", "GOOGL"]
+  start_date: "2015-01-01"
+  end_date: "2024-12-31"
+  sequence_length: 60            # Number of past time-steps (context)
+  prediction_horizon: 5          # Number of future time-steps to predict
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  batch_size: 64
+  features: ["Open", "High", "Low", "Close", "Volume"]
+  normalize: true
+
+  # ── High-frequency data options ─────────────────────────────────
+  # sampling_interval: "1s"      # Resample tick data to regular interval
+  # use_high_freq_features: true # Add HFT-specific features (spread, imbalance…)
+
+model:
+  r_jepa:
+    # Encoder (processes input time series)
+    encoder_input_dim: 5         # Number of input features
+    encoder_hidden_dim: 128
+    encoder_num_layers: 2
+    latent_dim: 64               # Dimension of latent space
+
+    # ── High-frequency encoder options ───────────────────────────
+    # conv_downsample: true      # Multi-scale Conv1D downsampling for long seqs
+    # use_transformer: true      # TransformerEncoder instead of BiLSTM
+    # nhead: 8                   # Number of attention heads (Transformer)
+
+    # Recurrent Predictor (predicts future latents)
+    predictor_hidden_dim: 128
+    predictor_num_layers: 2
+    predictor_dropout: 0.1
+
+    # Decoder (reconstructs stock prices from latents)
+    decoder_hidden_dim: 64
+    decoder_output_dim: 5        # Number of output features
+
+    # JEPA specific
+    momentum_encoder_tau: 0.996  # EMA update rate for target encoder
+    predictor_epsilon: 0.001     # Small constant for numerical stability
+
+training:
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  num_epochs: 100
+  patience: 10                   # Early stopping patience
+  gradient_clip_val: 1.0
+  use_amp: true                  # Automatic Mixed Precision
+  log_interval: 10
+  save_dir: "./checkpoints"
+
+  # ── Gradient accumulation ──────────────────────────────────────
+  # gradient_accumulation_steps: 4  # Effective batch = batch_size × steps
+
+prediction:
+  ensemble_size: 5               # Number of ensemble predictions
+  confidence_interval: 0.95      # Confidence interval for predictions

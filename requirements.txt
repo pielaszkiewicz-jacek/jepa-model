@@ -1,0 +1,11 @@
+# R-JEPA Stock Prediction Requirements
+# Python >= 3.13
+torch>=2.6.0
+torchvision>=0.21.0
+numpy>=2.2.0
+pandas>=2.2.0
+yfinance>=0.2.0
+matplotlib>=3.10.0
+scikit-learn>=1.6.0
+pyyaml>=6.0
+tqdm>=4.67.0
