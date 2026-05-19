@@ -24,6 +24,16 @@ class StockDecoder(nn.Module):
     ) -> None:
         super().__init__()
 
+        # ── Parameter validation ─────────────────────────────────
+        if latent_dim < 1:
+            raise ValueError(f"latent_dim must be >= 1, got {latent_dim}")
+        if hidden_dim < 1:
+            raise ValueError(f"hidden_dim must be >= 1, got {hidden_dim}")
+        if output_dim < 1:
+            raise ValueError(f"output_dim must be >= 1, got {output_dim}")
+        if num_layers < 1:
+            raise ValueError(f"num_layers must be >= 1, got {num_layers}")
+
         layers: list[nn.Module] = []
         current_dim = latent_dim
 
@@ -35,7 +45,11 @@ class StockDecoder(nn.Module):
                 layers.append(nn.GELU())
             current_dim = next_dim
 
-        layers.append(nn.Linear(current_dim, output_dim))
+        # Only add the final projection when the last loop iteration didn't
+        # already project to output_dim, eliminating the degenerate
+        # Linear(output_dim → output_dim) layer.
+        if current_dim != output_dim:
+            layers.append(nn.Linear(current_dim, output_dim))
         self.decoder = nn.Sequential(*layers)
         self._init_weights()
 

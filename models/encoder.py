@@ -43,6 +43,21 @@ class TimeSeriesEncoder(nn.Module):
     ) -> None:
         super().__init__()
 
+        # ── Parameter validation ─────────────────────────────────
+        if input_dim < 1:
+            raise ValueError(f"input_dim must be >= 1, got {input_dim}")
+        if hidden_dim < 1:
+            raise ValueError(f"hidden_dim must be >= 1, got {hidden_dim}")
+        if num_layers < 1:
+            raise ValueError(f"num_layers must be >= 1, got {num_layers}")
+        if latent_dim < 1:
+            raise ValueError(f"latent_dim must be >= 1, got {latent_dim}")
+        if not 0 <= dropout < 1:
+            raise ValueError(f"dropout must be in [0, 1), got {dropout}")
+        if use_transformer and nhead < 1:
+            raise ValueError(f"nhead must be >= 1 when use_transformer=True, got {nhead}")
+
+        self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
         self.use_transformer = use_transformer
         self.conv_downsample = conv_downsample

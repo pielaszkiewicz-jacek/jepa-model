@@ -16,6 +16,19 @@ class RecurrentPredictor(nn.Module):
 
     Uses a GRU with autoregressive decoding to iteratively predict
     future latent representations step by step.
+
+    Architecture:
+        context_latent [B, L]
+            │
+            ├── (optional) context_latent_seq [B, T, L] → GRU init
+            │
+            ├── context_aggregator: Linear(L→hidden) → LayerNorm → GELU
+            │       (projects latent to GRU hidden dimension for init)
+            │
+            ├── GRU(hidden→hidden, num_layers) — autoregressive loop
+            │
+            └── output_projection: Linear(hidden→hidden)→LN→GELU→Dropout
+                                   → Linear(hidden→L)
     """
 
     def __init__(
@@ -26,6 +39,16 @@ class RecurrentPredictor(nn.Module):
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
+
+        # ── Parameter validation ─────────────────────────────────
+        if latent_dim < 1:
+            raise ValueError(f"latent_dim must be >= 1, got {latent_dim}")
+        if hidden_dim < 1:
+            raise ValueError(f"hidden_dim must be >= 1, got {hidden_dim}")
+        if num_layers < 1:
+            raise ValueError(f"num_layers must be >= 1, got {num_layers}")
+        if not 0 <= dropout < 1:
+            raise ValueError(f"dropout must be in [0, 1), got {dropout}")
 
         self.latent_dim = latent_dim
 
@@ -78,11 +101,22 @@ class RecurrentPredictor(nn.Module):
         Returns:
             Predicted future latents [batch_size, prediction_horizon, latent_dim]
         """
+        # Initialise GRU hidden state
         if context_latent_seq is not None:
+            # Process full context sequence → last hidden as initial state
+            # GRU input:  [B, T, latent_dim]  (matches input_size=latent_dim)
+            # GRU output: [num_layers, B, hidden_dim]
             _, hidden = self.gru(context_latent_seq)
         else:
-            _, hidden = self.gru(context_latent.unsqueeze(1))
+            # Use context_aggregator to project latent_dim → hidden_dim
+            # and use it as the initial GRU hidden state
+            # agg:       [B, hidden_dim]
+            # hidden:    [num_layers, B, hidden_dim]  (repeat across layers)
+            agg = self.context_aggregator(context_latent)
+            hidden = agg.unsqueeze(0).repeat(self.gru.num_layers, 1, 1)
 
+        # Autoregressive input starts as the context latent
+        # GRU expects input_size=latent_dim throughout the loop
         current = context_latent.unsqueeze(1)  # [B, 1, latent_dim]
         predictions: list[Tensor] = []
 
@@ -117,8 +151,11 @@ class RecurrentPredictor(nn.Module):
             .reshape(batch_size * num_samples, -1)
         )
 
-        current = context_expanded.unsqueeze(1)
-        _, hidden = self.gru(current)
+        # Initialise hidden state via context_aggregator (latent_dim → hidden_dim)
+        agg = self.context_aggregator(context_expanded)  # [B*N, hidden_dim]
+        hidden = agg.unsqueeze(0).repeat(self.gru.num_layers, 1, 1)  # [num_layers, B*N, hidden_dim]
+
+        current = context_expanded.unsqueeze(1)  # [B*N, 1, latent_dim]
 
         predictions: list[Tensor] = []
         for _ in range(prediction_horizon):

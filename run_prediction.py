@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
+from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -65,13 +66,39 @@ def get_device(device_str: str) -> torch.device:
 
 def load_model(
     checkpoint_path: str, config: dict, device: torch.device,
-) -> RJEPA:
+) -> tuple[RJEPA, dict | None]:
+    """
+    Load model checkpoint and optional StandardScaler data.
+
+    Returns:
+        Tuple of (model, scaler_data), where scaler_data is a dict
+        with ``"mean"`` and ``"scale"`` keys (lists), or ``None`` if
+        the checkpoint does not contain scaler information.
+    """
     print(f"Loading model from {checkpoint_path}...")
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
 
-    mc = config.get("model", {}).get("r_jepa", {})
-    n_features = len(config.get("data", {}).get("features", ["Open", "High", "Low", "Close", "Volume"]))
-    n_features += 8  # engineered features
+    # Restore the full training config from checkpoint if available,
+    # otherwise fall back to the YAML config (which may have fewer fields).
+    full_config = ckpt.get("config", config)
+    mc = full_config.get("model", {}).get("r_jepa", {})
+
+    # Determine input dimension from the training data config.
+    # Use the stored config's feature list + the known engineered features count.
+    dc = full_config.get("data", {})
+    base_features = dc.get("features", ["Open", "High", "Low", "Close", "Volume"])
+    # Count engineered features by simulating what StockDataLoader._add_technical_features adds:
+    # standard: Returns, Log_Returns, High_Low_Ratio, Close_Open_Ratio,
+    #           MA_5, MA_20, MA_Ratio_5_20, Volatility_5, Volatility_20,
+    #           Volume_MA_5, Volume_Ratio, RSI_14  → 12 engineered features
+    engineerd_count = 12
+    use_hf = dc.get("use_high_freq_features", False)
+    if use_hf:
+        # HF features: Spread, Mid_Price (2 if Bid/Ask exist),
+        # Volume_Imbalance, Trade_Intensity, Micro_Volatility,
+        # Amihud_Illiq, Tick_Momentum → up to 7 extra
+        engineerd_count += 7
+    n_features = len(base_features) + engineerd_count
 
     model = RJEPA(
         input_dim=n_features,
@@ -84,12 +111,25 @@ def load_model(
         decoder_hidden_dim=mc.get("decoder_hidden_dim", 64),
         decoder_output_dim=n_features,
         momentum_tau=mc.get("momentum_encoder_tau", 0.996),
+        conv_downsample=mc.get("conv_downsample", False),
+        use_transformer=mc.get("use_transformer", False),
+        nhead=mc.get("nhead", 8),
     )
     model.load_state_dict(ckpt["model_state_dict"])
     model = model.to(device)
     model.eval()
+
+    # Extract saved scaler data if present
+    scaler_data: dict | None = ckpt.get("scaler_data")
+    if scaler_data is not None:
+        print(f"  StandardScaler loaded from checkpoint "
+              f"({len(scaler_data['mean'])} features)")
+    else:
+        print("  WARNING: No StandardScaler found in checkpoint — "
+              "inverse transforms may be incorrect")
+
     print(f"  Loaded (epoch {ckpt.get('epoch', '?')})")
-    return model
+    return model, scaler_data
 
 
 def main() -> None:
@@ -105,22 +145,41 @@ def main() -> None:
     print(f"  Horizon: {horizon} days")
     print(f"  Ensemble: {args.ensemble}\n")
 
-    model = load_model(args.checkpoint, config, device)
+    model, scaler_data = load_model(args.checkpoint, config, device)
 
     # Load & preprocess data
     print("\nLoading recent data...")
+    dc = config["data"]
+    tickers_val = dc["tickers"]
+    if isinstance(tickers_val, str):
+        tickers_val = [tickers_val]
     data_cfg = StockDataConfig(
-        tickers=tuple(config["data"]["tickers"]),
-        start_date=config["data"]["start_date"],
-        end_date=config["data"]["end_date"],
-        sequence_length=config["data"]["sequence_length"],
+        tickers=tuple(tickers_val),
+        start_date=dc["start_date"],
+        end_date=dc["end_date"],
+        sequence_length=dc["sequence_length"],
         prediction_horizon=horizon,
-        features=tuple(config["data"]["features"]),
-        normalize=config["data"].get("normalize", True),
+        features=tuple(dc["features"]),
+        normalize=dc.get("normalize", True),
+        sampling_interval=dc.get("sampling_interval"),
+        use_high_freq_features=dc.get("use_high_freq_features", False),
+        conv_downsample=config.get("model", {}).get("r_jepa", {}).get("conv_downsample", False),
+        use_transformer_encoder=config.get("model", {}).get("r_jepa", {}).get("use_transformer", False),
     )
     loader = StockDataLoader(data_cfg)
     all_data = loader.preprocess()
-    seq_len = config["data"]["sequence_length"]
+    seq_len = dc["sequence_length"]
+
+    # Override the data loader's scaler with checkpoint's scaler (if available)
+    # so that inverse_transform() uses the same normalisation as training.
+    if scaler_data is not None:
+        ckpt_scaler = StandardScaler()
+        ckpt_scaler.mean_ = np.array(scaler_data["mean"], dtype=np.float64)
+        scale_arr = np.array(scaler_data["scale"], dtype=np.float64)
+        ckpt_scaler.scale_ = scale_arr
+        ckpt_scaler.var_ = scale_arr ** 2  # type: ignore[operator]
+        loader._scaler = ckpt_scaler  # type: ignore[union-attr]
+        print("  Using StandardScaler from checkpoint for inverse transforms")
 
     # Prepare context: last seq_len samples
     context = torch.from_numpy(all_data[-seq_len:]).float().unsqueeze(0).to(device)
@@ -155,6 +214,24 @@ def main() -> None:
     else:
         preds_orig = loader.inverse_transform(preds)
 
+    # Inverse-transform confidence bounds as well (same padding scheme)
+    if upper is not None and lower is not None:
+        if upper.shape[1] < n_features_data:
+            upper_padded = np.zeros((upper.shape[0], n_features_data))
+            upper_padded[:, : upper.shape[1]] = upper
+            upper_orig = loader.inverse_transform(upper_padded)[:, : upper.shape[1]]
+        else:
+            upper_orig = loader.inverse_transform(upper)
+
+        if lower.shape[1] < n_features_data:
+            lower_padded = np.zeros((lower.shape[0], n_features_data))
+            lower_padded[:, : lower.shape[1]] = lower
+            lower_orig = loader.inverse_transform(lower_padded)[:, : lower.shape[1]]
+        else:
+            lower_orig = loader.inverse_transform(lower)
+    else:
+        upper_orig = lower_orig = None
+
     feature_names = loader.get_feature_names()
 
     print(f"\nPredictions (next {horizon} days):" + "\n" + "-" * 40)
@@ -169,8 +246,8 @@ def main() -> None:
         historical=hist_orig,
         predictions=preds_orig,
         targets=None,
-        upper_bound=upper,
-        lower_bound=lower,
+        upper_bound=upper_orig,
+        lower_bound=lower_orig,
         feature_names=feature_names[:4],
         title=f"{config['data']['tickers'][0]} — R-JEPA Prediction",
         save_path=args.plot,

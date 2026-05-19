@@ -66,6 +66,7 @@ graph LR
 | [`RJEPA`](../models/r_jepa.py:22) | Model główny | Komponuje encoder + predictor + decoder |
 | [`RJEPATrainer`](../training/trainer.py:26) | Trener | Pętla treningowa, walidacja, checkpointing |
 | [`JEPALoss`](../training/loss.py:40) | Funkcja straty | JEPA loss + reconstruction loss |
+| [`ExperimentTracker`](../utils/experiment_tracking.py:1) | MLflow tracking | Loguje parametry, metryki i artefakty do MLflow |
 
 ---
 
@@ -574,9 +575,29 @@ graph TD
         PLOT["training_history.png<br/>📈 ← wykres strat"]
     end
 
+    subgraph MLFLOW["🔬 MLflow (opcjonalnie)"]
+        ARTIFACTS["📦 Artefakty<br/>checkpoint_best.pt<br/>checkpoint_latest.pt<br/>training_metrics.json"]
+        PARAMS["⚙️ Parametry<br/>lr, batch_size, latent_dim, ..."]
+        METRICS_ML["📈 Metryki<br/>train_loss, val_loss, ..."]
+    end
+
+    BEST -.->|"log_artifact"| ARTIFACTS
+    LATEST -.->|"log_artifact"| ARTIFACTS
+    METRICS -.->|"log_artifact"| ARTIFACTS
+
     style CHECKPOINTS fill:#f3e5f5,stroke:#7b1fa2,color:#000
     style BEST fill:#fff9c4,stroke:#f57f17,color:#000
+    style MLFLOW fill:#e3f2fd,stroke:#1565c0,color:#000
+    style ARTIFACTS fill:#e3f2fd,stroke:#1565c0,color:#000
+    style PARAMS fill:#e3f2fd,stroke:#1565c0,color:#000
+    style METRICS_ML fill:#e3f2fd,stroke:#1565c0,color:#000
 ```
+
+Gdy [`ExperimentTracker`](../utils/experiment_tracking.py) jest włączony (`--experiment`), oprócz zapisu lokalnego:
+- Wszystkie parametry konfiguracji są logowane jako **MLflow params**
+- Metryki (train_loss, val_loss, learning_rate itd.) są logowane po każdej epoce jako **MLflow metrics**
+- Checkpointy i plik metrics JSON są wysyłane jako **MLflow artifacts**
+- Wszystko dostępne przez `mlflow ui` w przeglądarce
 
 **Zawartość checkpointu (`checkpoint_best.pt`):**
 
@@ -692,13 +713,31 @@ flowchart TD
         LR_CURVE["CosineAnnealingLR<br/>1e-3 → 1e-6"]
     end
 
+    subgraph MLFLOW_UI["🔬 MLflow UI (jeśli włączony)"]
+        UI["mlflow ui → http://localhost:5000<br/>Eksperyment: r-jepa<br/>Run: timestamp-based"]
+        UI_PARAMS["⚙️ Parametry<br/>batch_size=64, lr=0.001, ..."]
+        UI_METRICS["📈 Wykresy metryk<br/>train_loss, val_loss, lr<br/>w czasie rzeczywistym"]
+        UI_ARTIFACTS["📦 Artefakty<br/>checkpoint_best.pt<br/>training_metrics.json"]
+    end
+
     LOSS_PLOT --> LOSS_PLOT_CONTENT
     LOSS_PLOT --> LR_PLOT_CONTENT
+    METRICS_JSON -.->|"experiment_tracker<br/>log_artifact"| UI_ARTIFACTS
+    CKPT -.->|"experiment_tracker<br/>log_artifact"| UI_ARTIFACTS
 
     style OUTPUT fill:#e8f5e9,stroke:#2e7d32,color:#000
     style LOSS_PLOT_CONTENT fill:#e3f2fd,stroke:#1565c0,color:#000
     style LR_PLOT_CONTENT fill:#fff3e0,stroke:#e65100,color:#000
+    style MLFLOW_UI fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    style UI_PARAMS fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    style UI_METRICS fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    style UI_ARTIFACTS fill:#f3e5f5,stroke:#7b1fa2,color:#000
 ```
+
+Gdy MLflow tracking jest włączony (`--experiment`), wszystkie metryki są dostępne również przez interfejs MLflow:
+- Uruchom: `mlflow ui` w katalogu projektu
+- Otwórz: http://localhost:5000
+- Przeglądaj eksperymenty, porównuj uruchomienia, analizuj krzywe uczenia
 
 ### Kompletny przepływ po treningu
 

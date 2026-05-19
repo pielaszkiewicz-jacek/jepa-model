@@ -19,8 +19,16 @@ def variance_regularization(z: Tensor, epsilon: float = 0.001) -> Tensor:
     """
     Variance regularization to prevent collapse.
     Encourages each latent dimension to have std >= epsilon.
+
+    Uses a numerically stable computation of standard deviation:
+    ``sqrt(max(var, eps))`` instead of ``sqrt(var + eps)`` to avoid
+    exploding gradients when variance approaches zero (gradient of
+    sqrt(v) → 1/(2*sqrt(eps)) ≈ 50000 for eps=1e-10).
     """
-    std = torch.sqrt(z.var(dim=0) + 1e-10)
+    if z.shape[0] <= 1:
+        return torch.tensor(0.0, device=z.device)
+    var = z.var(dim=0)
+    std = torch.sqrt(torch.clamp(var, min=1e-6))
     return F.relu(epsilon - std).mean()
 
 
@@ -56,13 +64,13 @@ class JEPALoss(nn.Module):
         self,
         variance_weight: float = 0.5,
         covariance_weight: float = 0.1,
-        predictor_epsilon: float = 0.001,
+        variance_epsilon: float = 0.001,
         reconstruction_weight: float = 0.1,
     ) -> None:
         super().__init__()
         self.variance_weight = variance_weight
         self.covariance_weight = covariance_weight
-        self.predictor_epsilon = predictor_epsilon
+        self.variance_epsilon = variance_epsilon
         self.reconstruction_weight = reconstruction_weight
 
     def forward(
@@ -99,8 +107,8 @@ class JEPALoss(nn.Module):
 
         # ── Variance regularization ──────────────────────────────
         var_loss = 0.5 * (
-            variance_regularization(pred_mean, self.predictor_epsilon)
-            + variance_regularization(target_latent, self.predictor_epsilon)
+            variance_regularization(pred_mean, self.variance_epsilon)
+            + variance_regularization(target_latent, self.variance_epsilon)
         )
 
         # ── Covariance regularization ────────────────────────────

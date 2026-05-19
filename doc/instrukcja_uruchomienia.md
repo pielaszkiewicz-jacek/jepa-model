@@ -87,10 +87,12 @@ import matplotlib.pyplot as plt
 import sklearn
 import yaml
 from tqdm import tqdm
+import mlflow
 print('✓ Wszystkie importy działają poprawnie')
 print(f'  PyTorch: {torch.__version__}')
 print(f'  NumPy: {np.__version__}')
 print(f'  pandas: {pd.__version__}')
+print(f'  MLflow: {mlflow.__version__}')
 "
 ```
 
@@ -127,6 +129,14 @@ training:
   batch_size: 64
   patience: 10
   save_dir: "./checkpoints"
+
+experiment:
+  enabled: false              # Włącz MLflow tracking (true/false)
+  tracking_uri: null          # URI serwera MLflow (null = lokalnie ./mlruns)
+  experiment_name: "r-jepa"   # Nazwa eksperymentu
+  tags:
+    model: "r_jepa"
+    framework: "pytorch"
 ```
 
 ### 3.2 Dostępne tickery
@@ -194,6 +204,14 @@ python run_training.py \
     --latent_dim 128 \
     --save_dir ./checkpoints_aapl \
     --device auto
+
+# Z włączonym MLflow experiment tracking
+python run_training.py \
+    --ticker AAPL \
+    --epochs 50 \
+    --experiment \
+    --experiment_name "r-jepa-aapl" \
+    --tracking_uri "http://localhost:5000"
 ```
 
 ### 4.3 Oczekiwany output
@@ -240,6 +258,18 @@ Training completed!
 
 Step 5: Generating training plots...
 ```
+
+> **Uwaga**: Gdy MLflow tracking jest włączony (`--experiment`), dane treningowe są dodatkowo logowane:
+> - Parametry konfiguracji → MLflow params
+> - Metryki po każdej epoce → MLflow metrics (train_loss, val_loss, learning_rate itd.)
+> - Checkpointy → MLflow artifacts (checkpoint_best.pt, checkpoint_latest.pt, training_metrics.json)
+>
+> Aby przeglądać wyniki w MLflow UI:
+> ```bash
+> # Uruchom lokalny serwer MLflow
+> mlflow ui
+> # Otwórz http://localhost:5000 w przeglądarce
+> ```
 
 ### 4.4 Struktura katalogu po treningu
 

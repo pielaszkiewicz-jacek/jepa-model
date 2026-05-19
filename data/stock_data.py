@@ -19,6 +19,14 @@ from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
+from data.augmentation import (
+    Compose,
+    GaussianNoise,
+    MagnitudeWarping,
+    TimeWarping,
+    WindowSlice,
+)
+
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class StockDataConfig:
@@ -58,6 +66,11 @@ class StockDataConfig:
     use_high_freq_features: bool = False
     conv_downsample: bool = False
     use_transformer_encoder: bool = False
+    # Data augmentation (context-only, training-only)
+    aug_noise_std: float = 0.0
+    aug_magnitude_sigma: float = 0.0
+    aug_time_warp_sigma: float = 0.0
+    aug_window_slice_ratio: float = 0.0
 
 
 class StockDataLoader:
@@ -83,30 +96,48 @@ class StockDataLoader:
         """
         Preprocess data: resample if HF, handle NaN, normalize, combine tickers.
         Returns normalized feature matrix.
-        """
-        all_data: list[np.ndarray] = []
 
+        Normalization uses a SINGLE StandardScaler fitted on the COMBINED
+        training portion of ALL tickers, ensuring consistent scaling across
+        the portfolio and a single correct inverse_transform.
+        """
+        all_clean: list[np.ndarray] = []
+
+        # Step 1: Resample (if needed) and clean each ticker's data
         for ticker, df in self.data.items():
-            # Resample to regular interval if configured
             if self.config.sampling_interval is not None:
                 df = self.resample_to_interval(df, self.config.sampling_interval)
 
             df_clean = df.dropna()
+            self.processed_data[ticker] = df_clean.values
+            all_clean.append(df_clean.values)
+            print(f"  Cleaned {ticker}: {df_clean.shape[1]} features, "
+                  f"{df_clean.shape[0]} time steps")
 
+        # Step 2: Fit scaler ONCE on the combined training portion from ALL tickers
+        if self.config.normalize:
+            train_slices: list[np.ndarray] = []
+            for arr in all_clean:
+                train_size = int(len(arr) * self.config.train_split)
+                train_slices.append(arr[:train_size])
+            train_combined = np.concatenate(train_slices, axis=0)
+            self._scaler.fit(train_combined)
+            print(f"  Scaler fitted on combined training data: "
+                  f"{train_combined.shape[0]} rows from {len(all_clean)} ticker(s)")
+
+        # Step 3: Transform each ticker's data with the shared scaler
+        scaled_all: list[np.ndarray] = []
+        for ticker, arr in zip(self.data, all_clean):
             if self.config.normalize:
-                train_size = int(len(df_clean) * self.config.train_split)
-                train_data = df_clean.iloc[:train_size]
-                self._scaler.fit(train_data.values)
-                scaled_data = self._scaler.transform(df_clean.values)
+                scaled = self._scaler.transform(arr)
             else:
-                scaled_data = df_clean.values
+                scaled = arr
+            self.processed_data[ticker] = scaled
+            scaled_all.append(scaled)
+            print(f"  Preprocessed {ticker}: {scaled.shape[1]} features, "
+                  f"{scaled.shape[0]} time steps")
 
-            self.processed_data[ticker] = scaled_data
-            all_data.append(scaled_data)
-            print(f"  Preprocessed {ticker}: {scaled_data.shape[1]} features, "
-                  f"{scaled_data.shape[0]} time steps")
-
-        return np.concatenate(all_data, axis=0)
+        return np.concatenate(scaled_all, axis=0)
 
     def get_feature_names(self) -> list[str]:
         """Get names of all features including engineered ones."""
@@ -162,11 +193,19 @@ class StockDataLoader:
         """
         numeric = df.select_dtypes(include=[np.number])
 
-        resampled = numeric.resample(interval).agg({
-            col: "last" if col in ("Open", "High", "Low", "Close") else "sum"
-            if col == "Volume" else "last"
-            for col in numeric.columns
-        })
+        # Define aggregation rules per known column type
+        ohlc_cols = {"Open", "High", "Low", "Close"}
+        agg_rules: dict[str, str] = {}
+        for col in numeric.columns:
+            if col in ohlc_cols:
+                agg_rules[col] = "last"
+            elif col == "Volume":
+                agg_rules[col] = "sum"
+            else:
+                # Bid, Ask, Spread, and any engineered columns → last observed
+                agg_rules[col] = "last"
+
+        resampled = numeric.resample(interval).agg(agg_rules)
 
         # Forward-fill short gaps, then drop any remaining NaN
         resampled = resampled.ffill(limit=5).dropna()
@@ -203,7 +242,13 @@ class StockDataLoader:
         # ── Standard daily features ────────────────────────────────
         # Price-based features
         df["Returns"] = df["Close"].pct_change()
-        df["Log_Returns"] = np.log(df["Close"] / df["Close"].shift(1))
+        # Log_Returns: guard against zero/negative prices
+        shifted_close = df["Close"].shift(1)
+        df["Log_Returns"] = np.where(
+            shifted_close > 0,
+            np.log(df["Close"] / shifted_close),
+            0.0,
+        )
         df["High_Low_Ratio"] = df["High"] / df["Low"]
         df["Close_Open_Ratio"] = df["Close"] / df["Open"]
 
@@ -218,13 +263,17 @@ class StockDataLoader:
 
         # Volume-based features
         df["Volume_MA_5"] = df["Volume"].rolling(window=5).mean()
-        df["Volume_Ratio"] = df["Volume"] / df["Volume_MA_5"]
+        # Guard against zero MA_5 for Volume_Ratio
+        volume_ma_5_safe = df["Volume_MA_5"].replace(0, np.nan)
+        df["Volume_Ratio"] = df["Volume"] / volume_ma_5_safe
 
         # RSI (Relative Strength Index)
         delta = df["Close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
+        # Guard against zero loss (RSI = 100 when no losses)
+        loss_safe = loss.replace(0, np.nan)
+        rs = gain / loss_safe
         df["RSI_14"] = 100 - (100 / (1 + rs))
 
         # ── High-frequency features (optional) ─────────────────────
@@ -239,28 +288,32 @@ class StockDataLoader:
         These capture microstructure effects such as bid-ask spread,
         order-flow imbalance, and intra-interval volatility.
         """
+        eps = 1e-10  # numerical stability floor
+
         # Spread (if Bid/Ask columns exist)
         if "Bid" in df.columns and "Ask" in df.columns:
-            df["Spread"] = (df["Ask"] - df["Bid"]) / ((df["Ask"] + df["Bid"]) / 2)
-            df["Mid_Price"] = (df["Ask"] + df["Bid"]) / 2
+            mid = (df["Ask"] + df["Bid"]) / 2
+            df["Spread"] = (df["Ask"] - df["Bid"]) / mid.where(mid > 0, np.nan)
+            df["Mid_Price"] = mid
 
         # Volume Imbalance — proxy for order-flow pressure
         # Positive = buying pressure, Negative = selling pressure
         volume_diff = df["Volume"].diff()
-        df["Volume_Imbalance"] = volume_diff / (df["Volume"] + 1e-8)
+        df["Volume_Imbalance"] = volume_diff / (df["Volume"] + eps)
 
         # Trade Intensity — volume per time step
-        df["Trade_Intensity"] = df["Volume"] / (df["Volume"].rolling(10).mean() + 1e-8)
+        volume_ma_10 = df["Volume"].rolling(10).mean()
+        df["Trade_Intensity"] = df["Volume"] / (volume_ma_10 + eps)
 
         # Micro-Volatility — high-frequency volatility (intra-interval)
         df["Micro_Volatility"] = (
-            (df["High"] - df["Low"]) / (df["Close"] + 1e-8)
+            (df["High"] - df["Low"]) / (df["Close"] + eps)
         )
 
         # Amihud Illiquidity Ratio — price impact per unit volume
         # Higher values indicate lower liquidity
         abs_return = df["Returns"].abs()
-        df["Amihud_Illiq"] = abs_return / (df["Volume"] + 1e-8)
+        df["Amihud_Illiq"] = abs_return / (df["Volume"] + eps)
 
         # Tick-level momentum — acceleration of returns
         df["Tick_Momentum"] = df["Returns"].diff()
@@ -284,12 +337,14 @@ class StockDataset(Dataset):
         sequence_length: int,
         prediction_horizon: int,
         stride: int = 1,
+        augmenter: Callable[[Tensor], Tensor] | None = None,
     ) -> None:
         super().__init__()
         self.data = torch.from_numpy(data).float()
         self.sequence_length = sequence_length
         self.prediction_horizon = prediction_horizon
         self.stride = stride
+        self.augmenter = augmenter
 
         total_len = len(data)
         self.valid_indices = list(
@@ -306,7 +361,34 @@ class StockDataset(Dataset):
 
         context = self.data[start_idx:end_context]  # [seq_len, n_features]
         target = self.data[end_context:end_target]  # [pred_horizon, n_features]
+
+        # Augmentation: only applied to context (not target), so the
+        # prediction task becomes harder while the ground-truth future
+        # remains unchanged.
+        if self.augmenter is not None:
+            context = self.augmenter(context)
+
         return context, target
+
+
+def _build_augmenter(config: StockDataConfig) -> Compose | None:
+    """Build augmentation pipeline from config, or None if all disabled."""
+    transforms: list[Callable[[Tensor], Tensor]] = []
+
+    if config.aug_noise_std > 0:
+        transforms.append(GaussianNoise(std=config.aug_noise_std))
+    if config.aug_magnitude_sigma > 0:
+        transforms.append(
+            MagnitudeWarping(sigma=config.aug_magnitude_sigma)
+        )
+    if config.aug_time_warp_sigma > 0:
+        transforms.append(TimeWarping(sigma=config.aug_time_warp_sigma))
+    if config.aug_window_slice_ratio > 0:
+        transforms.append(
+            WindowSlice(ratio=config.aug_window_slice_ratio)
+        )
+
+    return Compose(transforms) if transforms else None
 
 
 def create_dataloaders(
@@ -338,9 +420,12 @@ def create_dataloaders(
     common = dict(sequence_length=config.sequence_length,
                   prediction_horizon=config.prediction_horizon)
 
-    train_dataset = StockDataset(train_data, **common)
-    val_dataset = StockDataset(val_data, **common)
-    test_dataset = StockDataset(test_data, **common)
+    # Build augmenter for training data (only if enabled in config)
+    augmenter = _build_augmenter(config)
+
+    train_dataset = StockDataset(train_data, augmenter=augmenter, **common)
+    val_dataset = StockDataset(val_data, augmenter=None, **common)
+    test_dataset = StockDataset(test_data, augmenter=None, **common)
 
     loader_kwargs: dict = dict(
         batch_size=batch_size,

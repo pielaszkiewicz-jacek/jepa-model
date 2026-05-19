@@ -48,6 +48,28 @@ class RJEPA(nn.Module):
     ) -> None:
         super().__init__()
 
+        # ── Parameter validation ─────────────────────────────────
+        if input_dim < 1:
+            raise ValueError(f"input_dim must be >= 1, got {input_dim}")
+        if encoder_hidden_dim < 1:
+            raise ValueError(f"encoder_hidden_dim must be >= 1, got {encoder_hidden_dim}")
+        if encoder_num_layers < 1:
+            raise ValueError(f"encoder_num_layers must be >= 1, got {encoder_num_layers}")
+        if latent_dim < 1:
+            raise ValueError(f"latent_dim must be >= 1, got {latent_dim}")
+        if predictor_hidden_dim < 1:
+            raise ValueError(f"predictor_hidden_dim must be >= 1, got {predictor_hidden_dim}")
+        if predictor_num_layers < 1:
+            raise ValueError(f"predictor_num_layers must be >= 1, got {predictor_num_layers}")
+        if not 0 <= predictor_dropout < 1:
+            raise ValueError(f"predictor_dropout must be in [0, 1), got {predictor_dropout}")
+        if decoder_hidden_dim < 1:
+            raise ValueError(f"decoder_hidden_dim must be >= 1, got {decoder_hidden_dim}")
+        if not 0 < momentum_tau < 1:
+            raise ValueError(f"momentum_tau must be in (0, 1), got {momentum_tau}")
+        if nhead < 1:
+            raise ValueError(f"nhead must be >= 1, got {nhead}")
+
         self.latent_dim = latent_dim
         decoder_output_dim = decoder_output_dim or input_dim
 
@@ -79,6 +101,27 @@ class RJEPA(nn.Module):
             output_dim=decoder_output_dim,
         )
 
+    def _encode_context(self, context: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Encode context sequence and extract the final latent state.
+
+        Shared helper used by both :meth:`forward` and :meth:`predict`
+        to avoid duplicating the encoder call.
+
+        Args:
+            context: Input tensor of shape ``[batch, seq_len, n_features]``.
+
+        Returns:
+            Tuple of ``(context_latent_seq, context_latent)`` where:
+            - ``context_latent_seq`` — full encoder output sequence
+              ``[batch, seq_len, latent_dim]``.
+            - ``context_latent`` — last time-step latent
+              ``[batch, latent_dim]``.
+        """
+        context_latent_seq = self.online_encoder(context, return_sequence=True)
+        context_latent = context_latent_seq[:, -1, :]
+        return context_latent_seq, context_latent
+
     def forward(
         self,
         context: Tensor,
@@ -92,8 +135,7 @@ class RJEPA(nn.Module):
             prediction_horizon = target.shape[1]
 
         # Encode context
-        context_latent_seq = self.online_encoder(context, return_sequence=True)
-        context_latent = context_latent_seq[:, -1, :]
+        context_latent_seq, context_latent = self._encode_context(context)
 
         # Predict future latents
         predicted_latents = self.predictor(
@@ -134,9 +176,8 @@ class RJEPA(nn.Module):
                 "latents": output["predicted_latents"],
             }
 
-        # Ensemble predictions
-        context_latent_seq = self.online_encoder(context, return_sequence=True)
-        context_latent = context_latent_seq[:, -1, :]
+        # Encode context (shared helper)
+        context_latent_seq, context_latent = self._encode_context(context)
 
         ensemble_latents = self.predictor.predict_with_noise(
             context_latent=context_latent,

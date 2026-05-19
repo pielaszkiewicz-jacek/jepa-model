@@ -140,34 +140,55 @@ Predyktor $g_\phi: \mathbb{R}^L \to \mathbb{R}^{H \times L}$ przekształca laten
 
 ### 5.1 Architektura
 
+Predyktor obsługuje **dwa scenariusze inicjalizacji** GRU:
+
+1. **Sekwencja kontekstu dostępna** ($Z_c \in \mathbb{R}^{T \times L}$): GRU przetwarza całą sekwencję, ostatni stan ukryty staje się inicjalizacją autoregresji.
+2. **Tylko pojedynczy latent** ($z_c \in \mathbb{R}^L$): `context_aggregator` projektuje $L \to H_{\text{hidden}}$, a wynik jest używany jako stan początkowy GRU.
+
 ```
-Wejście: z_c ∈ ℝ^L (lub Z_c ∈ ℝ^{T×L})
-    │
-    ├── GRU(latent_dim → hidden_dim, N layers)
-    │   (inicjalizacja: z_c lub Z_c)
+              ┌─── Z_c ∈ ℝ^{T×L} ──→ GRU(seq) ──→ h_init
+              │
+Wejście: z_c ─┤                    ┌─ Linear(L→H) ─┐
+              │                    ├─ LayerNorm    ├─→ h_init ∈ ℝ^{H}
+              └─── (sam latent) ──→└─ GELU        ┘
+                                        (context_aggregator)
+
+GRU(input_size=L, hidden_size=H, N layers)
     │
     ├── Dla k = 1..H:
-    │   ├── GRU_step(ẑ_{k-1}, hidden_k)
-    │   ├── Linear(hidden_dim → L)
-    │   └── ẑ_k = output
+    │   ├── input:  ẑ_{k-1} ∈ ℝ^L     (input_size = L)
+    │   ├── GRU_step(ẑ_{k-1}, h_{k-1})
+    │   ├── Proj: Linear(H → H) → LN → GELU → Dropout → Linear(H → L)
+    │   └── ẑ_k ∈ ℝ^L
     │
-    └── Stack: [ẑ_1, ẑ_2, ..., ẑ_H]
+    └── Stack: [ẑ_1, ẑ_2, ..., ẑ_H] ∈ ℝ^{H×L}
 
 Wyjście: Ẑ ∈ ℝ^{H×L}
 ```
 
+**Uwaga**: GRU ma `input_size = latent_dim = L` — zarówno wejście inicjalizacyjne (przez `context_aggregator` jako stan ukryty, nie jako wejście GRU), jak i każdy krok autoregresji operują na wektorach wymiaru $L$.
+
 ### 5.2 Proces autoregresyjny
 
-Predykcja latentów odbywa się krok po kroku:
+Predykcja latentów odbywa się krok po kroku.
 
-$$h_0 = \text{GRU}_{\text{init}}(z_c)$$
+**Inicjalizacja** (dwa warianty):
+
+Gdy dostępna jest pełna sekwencja kontekstu $Z_c \in \mathbb{R}^{T \times L}$:
+$$h_0 = \text{GRU}_{\text{seq}}(Z_c) \quad \text{(ostatni stan ukryty po przetworzeniu całej sekwencji)}$$
+
+Gdy dostępny jest tylko pojedynczy latent $z_c \in \mathbb{R}^L$:
+$$h_0 = \text{Aggregator}(z_c) = \text{GELU}(\text{LayerNorm}(W_{\text{agg}} \cdot z_c + b_{\text{agg}}))$$
+gdzie $W_{\text{agg}} \in \mathbb{R}^{H \times L}$.
+
+**Pętla autoregresyjna** (jednakowa dla obu wariantów):
 
 Dla $k = 1, \dots, H$:
 
 $$h_k = \text{GRU}(\hat{z}_{k-1}, h_{k-1})$$
-$$\hat{z}_k = W_{\text{out}} \cdot h_k + b_{\text{out}}$$
+$$\hat{z}_k = W_{\text{out},2} \cdot \text{GELU}(\text{LayerNorm}(W_{\text{out},1} \cdot h_k + b_{\text{out},1})) + b_{\text{out},2}$$
 
-gdzie $\hat{z}_0 = z_c$ (latent kontekstu jako pierwsze "przewidywanie").
+gdzie $\hat{z}_0 = z_c$ (latent kontekstu jako pierwsze "przewidywanie"), a $W_{\text{out},1} \in \mathbb{R}^{H \times H}$, $W_{\text{out},2} \in \mathbb{R}^{L \times H}$.
 
 ### 5.3 Predykcja z szumem (ensemble)
 

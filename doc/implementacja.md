@@ -531,6 +531,7 @@ class RJEPATrainer:
         val_loader: DataLoader,
         config: Mapping[str, Any],
         device: torch.device | None = None,
+        experiment_tracker: ExperimentTracker | None = None,
     ) -> None:
 ```
 
@@ -539,6 +540,7 @@ class RJEPATrainer:
 - `CosineAnnealingLR(T_max=num_epochs, eta_min=1e-6)` — scheduler cosinusowy
 - `GradScaler(enabled=use_amp)` — AMP dla szybszego treningu na GPU
 - `save_dir = Path(training_config[...])` — zarządzanie ścieżkami przez pathlib
+- `self.experiment_tracker = experiment_tracker` — MLflow experiment tracker (opcjonalny)
 
 ### 7.2 Pętla treningowa
 
@@ -553,7 +555,14 @@ def train(self) -> RJEPA:
    - Sprawdzenie early stopping
    - Zapis checkpointa (best + latest)
 
-2. Szczegółowy przepływ `_train_epoch()` — jedna iteracja batcha:
+2. **MLflow Experiment Tracking** — jeżeli `experiment_tracker` został przekazany:
+   - Na starcie: logowanie wszystkich hiperparametrów z konfiguracji (`log_params(config)`)
+   - Po każdej epoce: logowanie metryk (`log_metrics`) — train_loss, val_loss, learning_rate, prediction_loss, variance_loss, covariance_loss, reconstruction_loss
+   - Przy zmianie curriculum horizon: logowanie nowej wartości
+   - Po treningu: zapisanie checkpointów jako artefaktów (`log_artifact`) — checkpoint_best.pt, checkpoint_latest.pt, training_metrics.json
+   - Wszystkie metryki i artefakty są dostępne w UI MLflow (`mlflow ui`)
+
+3. Szczegółowy przepływ `_train_epoch()` — jedna iteracja batcha:
 
 ```mermaid
 flowchart TD
@@ -649,19 +658,37 @@ Rysuje:
 ### 9.1 Użycie
 
 ```bash
+# Podstawowe uruchomienie
 python run_training.py --ticker AAPL --start 2020-01-01 --end 2024-12-31 --epochs 50
+
+# Z włączonym MLflow experiment tracking
+python run_training.py \
+    --ticker AAPL \
+    --epochs 50 \
+    --experiment \
+    --experiment_name "r-jepa-aapl" \
+    --tracking_uri "http://localhost:5000"
 ```
+
+Dodatkowe argumenty CLI dla experiment tracking:
+| Argument | Typ | Opis |
+|----------|-----|------|
+| `--experiment` | flag | Włącza MLflow experiment tracking |
+| `--experiment_name` | str | Nazwa eksperymentu w MLflow (nadpisuje config) |
+| `--tracking_uri` | str | URI serwera MLflow (nadpisuje config) |
 
 ### 9.2 Przebieg
 
 1. Wczytanie konfiguracji z YAML
 2. Nadpisanie parametrami z CLI (match/case dla device)
-3. Inicjalizacja StockDataLoader → pobranie danych
-4. Inżynieria cech → normalizacja
-5. Podział na train/val/test
-6. Inicjalizacja modelu R-JEPA
-7. Trening przez RJEPATrainer
-8. Zapis wykresu treningowego
+3. Inicjalizacja `_build_experiment_tracker()` — tworzy `ExperimentTracker` na podstawie configu i CLI
+4. Inicjalizacja StockDataLoader → pobranie danych
+5. Inżynieria cech → normalizacja
+6. Podział na train/val/test
+7. Inicjalizacja modelu R-JEPA
+8. Trening przez RJEPATrainer (z przekazanym `experiment_tracker`)
+9. Zapis wykresu treningowego
+10. Zakończenie sesji MLflow (`tracker.end_run()`)
 
 ---
 

@@ -43,7 +43,7 @@ model:
 
     # JEPA specific
     momentum_encoder_tau: 0.996  # EMA update rate for target encoder
-    predictor_epsilon: 0.001     # Small constant for numerical stability
+    variance_epsilon: 0.001      # Epsilon for variance regularization (numerical stability)
 
 training:
   learning_rate: 0.001
@@ -55,9 +55,25 @@ training:
   log_interval: 10
   save_dir: "./checkpoints"
 
+  # ── Curriculum learning (progressive prediction horizon) ──────
+  curriculum:
+    enabled: false              # Set true to enable curriculum learning
+    initial_horizon: 1          # Start predicting 1 step
+    warmup_epochs: 10           # Epochs at initial_horizon before increasing
+    step_epochs: 5              # Epochs per intermediate horizon step
+
   # ── Gradient accumulation ──────────────────────────────────────
   # gradient_accumulation_steps: 4  # Effective batch = batch_size × steps
 
 prediction:
   ensemble_size: 5               # Number of ensemble predictions
   confidence_interval: 0.95      # Confidence interval for predictions
+
+experiment:
+  enabled: false                 # Set true to enable MLflow tracking
+  tracking_uri: null             # MLflow server URI (null = local ./mlruns)
+  experiment_name: "r-jepa"      # MLflow experiment name
+  run_name: null                 # Auto-generated if null
+  tags:
+    model: "r_jepa"
+    framework: "pytorch"
